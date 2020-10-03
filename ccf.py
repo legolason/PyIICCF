@@ -1,5 +1,5 @@
 #A code to measure the time lag in reverberation mapping
-#Last modified on 9/1/2020
+#Last modified on 10/3/2020
 #Auther: Hengxiao Guo (UCI), Aaron Barth (UCI)
 #Email: hengxiaoguo AT gmail DOT com, barth AT uci DOT edu
 #version 1.0
@@ -56,7 +56,7 @@ class CCF():
     def __init__(self):
         pass
     
-    def ICCF(self, t1, y1, e1, t2, y2, e2, tau_min = -100, tau_max = 100, step = 0.2, detrend = 0, interp = 'linear', mcmc_nsamples = 20000, auto_pq = False, p1 = 1, q1 = 0, p2 = 1, q2 = 0, carma_model = 'random', sig_cut = 0.8, imode = 0, MC_ntrials = 1000, FR_RSS = 0, sigmode = 0.2, weight = False, nsmooth_wgts = 5, sim_ntrials = 1000, scale_simLC = False, Nmodel = 2, MP = True, name = 'results', plotLC = True, shift = 'centroid', plotCCF = True, save = True, lite = True, path = './'):
+    def ICCF(self, t1, y1, e1, t2, y2, e2, tau_min = -100, tau_max = 100, step = 0.2, detrend = 0, interp = 'linear', mcmc_nsamples = 20000, auto_pq = False, p1 = 1, q1 = 0, p2 = 1, q2 = 0, carma_model = 'random', sig_cut = 0.8, imode = 0, MC_ntrials = 1000, FR_RSS = 0, sigmode = 0.2, weight = False, nsmooth_wgts = 1, sim_ntrials = 1000, scale_simLC = False, Nmodel = 2, MP = True, name = 'results', plotLC = True, shift = 'centroid', plotCCF = True, save = True, lite = True, path = './'):
         '''
         Main function will call other functions. This function is able to detrend the light curve, measure the time lag, 
         evaluate the lag uncertianties with Flux Randomization (FR) and Random Subset Sampling (RSS) and the significance with simulated CARMA Light Curves (LC).
@@ -96,8 +96,8 @@ class CCF():
             n (>= 0) trials of light curve simulation. Only applied when SIM is True.
         weight: Bool
             apply the weights to lag posterier if True. Weights are decided by ACF and overlapping points. Our method is similar to Grier+19. See the details in Grier et al. 2019, ApJ, 887, 38
-        nsmooth_wgts: interger
-            n pixel car-box smooth for the lag posterier to decide the region (or local minimum around the primary peak) to calculate the lag and its uncertainties.
+        nsmooth_wgts: > 0
+            a scale factor multiply on the Gaussain bandwidth according to Scott's Rule n^(-0.2) [sigma], n is number of data points, for the lag posterier to decide the region (or local minimum around the primary peak) to calculate the lag and its uncertainties.
         sim_ntrials: interger
             n (even number, >2) trials of simulation to evaluate the lag significance. 0.5n trials are calculating the CCF between real continuum LC and simulated emission line LC, and the rest 0.5 is opposite.
         scale_simLC: bool
@@ -115,31 +115,34 @@ class CCF():
         plotCCF: bool
             pllt CCF results if True.
         save: Bool
-            save figures and CCF results into fits if ture, and MC_ntrial>1, sim_ntrials >2.
+            save figures and CCF results into fits if ture. MC_ntrial>1, sim_ntrials >2 are needed.
         lite: Bool
-            save a lite version of fits
+            save a lite version of the fits file.
         path: string
-            location path for the saved fits and figures.
+            path of the saved fits and figures.
     
             
         Retrun:
         t1, y1, e1, t2, y2, e2: 
-            orignial or detrended (if detrend = True) ligit curves.
+            orignial or detrended (if detrend = True) light curves.
         lag, r:
             time lag array and averaged CCF pearson r array with two ways.
-        lag_12, r_12, lag21, r_21:
-            one-way time lag and CCF results. 12 is CCF between y1 and interpolated y2, 21 is opposite.
-        npt, npt_12, npt_21:
-            overlapping points in CCF, npt is averaged and npt_12 (npt_21) is one-way result.
+        lag_cen, lag_peak:
+            actual CCF results of lag centroid and peak values.
+        lag_1, r_1, lag_2, r_2:
+            one-way time lag and CCF results. 1: interpolate y1. 2: interpolate y2.
+        npt, npt_1, npt_2:
+            overlapping points in CCF, npt is averaged and npt_1 (npt_2) is one-way result.
         p1, q1, p2, q2:
             the assumed CARMA model. The best p and q if auto_pq is True, 1 for continuum and 2 for emission line.
+        var_sn1, var_sn2:
+            sginal-to-noise ratio of the variability for continuum and emission-line light curves sqrt(chi^2-DOF), chi^2 = SUM [(Xobs-Xmedian)^2/sig^2] and DOF = N_lightcuve-1.      
         sample1, sample2:
             CARMA MCMC sample for y1 (sample1) and y2 (sample2). see details in Kelly Brandon's carma_pack.
-        failed_CCF:
-            CCF result hit the tau boundaries (i.e., tau_min or tau_max). We call these failed CCF results, 
-            which have been removed when calculate the lag errors.    
+        failed_CCF_MC:
+            number of CCF result hits the tau boundaries (i.e., tau_min or tau_max). 
         peak_pack_MC, cen_pack_MC:
-            lag and its error (1 sigma) from Monte Carlo method, i.e., [lower_limit, best, upper_limit].
+            lag and its error (1 sigma) from Monte Carlo method, i.e., [lower_error, best, upper_error].
         lag_peak_MC, lag_cen_MC:
             lag peak and centroid in flux randomization with Monte Carlo method. Failed CCF results have been
             removed.
@@ -147,10 +150,17 @@ class CCF():
             fraction of positive simulated CCF peak larger than real-data CCF peak at tau >0, i.e., N1(tau>0&r>r_max_data)/N0(tau>0)
         p_all:
             fraction of simulated CCF peak larger than real-data CCF peak at any tau, i.e., N2(r>r_max_data)/N0
-            
-        
+        p_peak:
+            fraction of simulated CCF peak larger than real-data CCF peak at peak bin.
+        lag_sim, lag_sim_cen, lag_sim_peak, r_sim, r_sim_cen, r_sim_peak
+            lag_sim and r_sim saved all the simlated CCF curves. lag_sim_cen, lag_sim_peak, r_sim_cen and r_sim_peak are the corresponding
+            peak/centroid lag and r.
+        peak_left, peak_right, cen_left, cen_right:
+            left and right boundaries of the effctive region used to calculated lag peak/centroid when weights applied.
+        peak_kde, cen_ked:
+            smoothed peak/centroid lag MC posterior profile.
         '''
-        
+    
         self.t1 = np.asarray(t1, dtype = np.float64)
         self.y1 = np.asarray(y1, dtype = np.float64)
         self.e1 = np.asarray(e1, dtype = np.float64)
@@ -184,9 +194,13 @@ class CCF():
         self.nsmooth_wgts = nsmooth_wgts
         self.shift = shift
         
+        
         # check parameters
         if self.Nmodel <2 and self.Nmodel > self.sim_ntrials:
             raise Exception("Number of models should be between 2 and sim_ntrials!") 
+            
+        if self.interp != 'linear' and self.interp != 'carma':
+            raise Exception("interp must be 'linear' or 'carma'!") 
         
         # check the light curve  
         if t1.shape[0] <10 or t2.shape[0] <10:
@@ -198,6 +212,11 @@ class CCF():
             ind2 = np.argsort(self.t2)
             self.t1, self.y1, self.e1 = self.t1[ind1], self.y1[ind1], self.e1[ind1]
             self.t2, self.y2, self.e2 = self.t2[ind2], self.y2[ind2], self.e2[ind2]
+            
+        # calculate the variability SNR
+        self.var_sn1 = np.sqrt(np.sum(((self.y1-np.median(self.y1))**2/self.e1**2)) - (len(self.y1)-1))
+        self.var_sn2 = np.sqrt(np.sum(((self.y2-np.median(self.y2))**2/self.e2**2)) - (len(self.y2)-1))
+        
             
         # choose the best p&q in carma model automatically for the LCs
         if auto_pq == True:
@@ -217,14 +236,7 @@ class CCF():
             ind_finite = np.where(~np.isnan(AICc) & np.isfinite(AICc))
             self.p2, self.q2 =  np.array(pqlist)[ind_finite][np.argmin(np.array(AICc)[ind_finite])]
             
-            
-        '''
-        plt.figure(figsize = (15, 10))
-        plt.subplot(211)
-        plt.errorbar(self.t1, self.y1, yerr = self.e1, fmt = '.', color = 'k', lw = 1)
-        plt.subplot(212)
-        plt.errorbar(self.t2, self.y2, yerr = self.e2, fmt = '.', color = 'k', lw = 1)
-        '''
+
         # detrend with nth polynomial  
         if detrend >0:
             T = np.linspace(self.t1.min(), self.t1.max(), 1000)
@@ -237,16 +249,7 @@ class CCF():
             line = np.poly1d(np.polyfit(self.t2, self.y2, detrend))
             line_new = np.interp(self.t2, T, line(T))
             self.y2 = self.y2-line_new+line_new.mean()
-        '''
-        plt.subplot(211)
-        plt.errorbar(self.t1, self.y1, yerr = self.e1, fmt = '.', color = 'r', lw = 1)
-        plt.ylabel('Flux')
-        plt.subplot(212)
-        plt.errorbar(self.t2, self.y2, yerr = self.e2, fmt = '.', color = 'r', lw = 1)
-        plt.plot(T, line(T), 'b')     
-        plt.ylabel('Flux')
-        plt.xlabel('Time (days)')
-        '''
+
         # calculate ICCF with linear or CARMA model   
         global N
         N = 0 # for actual data
@@ -389,32 +392,7 @@ class CCF():
             npt = npt_2
         else:
             raise Exception("Please select imode = 0, 1 or 2!") 
-            
-        '''
-        plt.figure(figsize = (8, 3)) 
-        plt.plot(lag, r, 'k')
-        plt.plot([-750, 750], [r.max(), r.max()], 'r')
-        plt.xlim(-750, 750)
-        plt.ylabel('r')
-        plt.xlabel('Lag (days)')
-        
-        plt.figure(figsize = (8, 6))
-        #plt.plot(lag_12, r_12, 'k--', label = 'interp y2')
-        #plt.plot(lag_21, r_21, 'k:', label = 'interp y1')
-        plt.plot(lag, r, 'r', label = 'mean')
-        plt.plot(lag[np.where(r>0.8*r.max(), True, False)], r[np.where(r>0.8*r.max(), True, False)], 'b')
-        plt.ylabel('r')
-        plt.xlabel('Lag (days)')
-        plt.legend()
-        
-        plt.figure(figsize = (8, 6))
-        plt.plot(lag_12, npt_12, 'k--', label = 'interp y2')
-        plt.plot(lag_21, npt_21, 'k:', label = 'interp y1')
-        plt.plot(lag, npt, 'r', label = 'mean')
-        plt.ylabel('Number of points')
-        plt.xlabel('Lag (days)')
-        plt.legend()
-        '''
+
         
         # get the peak and centroid of data-based CCF
         if N  ==  0:
@@ -464,6 +442,7 @@ class CCF():
         # calculate overlapping points see Grier+ 2019 P = (N(tau)/N(0))^2
         npt0 = float(self.npt[(np.abs(self.lag-0.)).argmin()])
         overlap_npt = ((self.npt/npt0))**2 # here a little different from Grier, they use npt_12
+        overlap_npt = overlap_npt/overlap_npt.max() # normalized to 1
         # convolve ACF and overlapping points
         weight_unnorm = np.convolve(r_ACF, overlap_npt, 'same')
         weighting = weight_unnorm/weight_unnorm.max()
@@ -524,20 +503,6 @@ class CCF():
                     y2 = np.random.normal(np.interp(self.t2, t2_tmp, y2_tmp), self.e2)
                     t1, t2, e1, e2 = self.t1, self.t2, self.e1, self.e2
                     
-                    '''
-                    plt.figure(figsize = (10, 6))
-                    plt.subplots_adjust(hspace = 0)
-                    plt.subplot(211)
-                    plt.errorbar(t1, y1, yerr = e1, fmt = '.', color = 'k', lw = 1, ms = 5)
-                    #plt.plot(t1_tmp, y1_tmp, 'b', lw = 1)
-                    plt.ylabel('Flux')
-                    plt.xticks([])
-                    plt.subplot(212)
-                    plt.errorbar(t2, y2, yerr = e2, fmt = '.', color = 'k', lw = 1, ms = 5)
-                    #plt.plot(t2_tmp, y2_tmp, 'b', lw = 1)
-                    plt.ylabel('Flux')
-                    plt.xlabel('Time')
-                    '''
                 # do CCF for each MC
                 lag, r, npt = self.ICCF_CARMA(t1, y1, e1, t2, y2, e2, tau_min = self.tau_min, tau_max = self.tau_max, step = self.step, interp = self.interp, mcmc_nsamples = self.mcmc_nsamples, p1 = self.p1, q1 = self.q1, p2 = self.p2, q2 = self.q2, carma_model = self.carma_model, imode = self.imode)
                 # find the peak and centroid
@@ -575,7 +540,7 @@ class CCF():
         self.failed_CCF_MC = len(lag_peak_MC)-np.sum(ind)
         
         #----------------------------------------------------------------------------
-        # calculate the centers and 1 sigma error for weighted/non-weighted cases.
+        # calculate the centers and 1 sigma error for weighted/unweighted cases.
         if np.sum(ind)>0:
             if self.weight == False:
                 lag_peak_low = np.round(np.percentile(lag_peak_MC[ind], 50)-np.percentile(lag_peak_MC[ind], 16), 2)
@@ -590,28 +555,31 @@ class CCF():
             else:
                 # find weighted peak distribution
                 wgts = np.interp(lag_peak_MC[ind], self.lag, self.weighting)
-                bins = np.arange(lag_peak_MC[ind].min(), lag_peak_MC[ind].max(), (lag_peak_MC[ind].max()-lag_peak_MC[ind].min())/100.)
-                hist = np.histogram(lag_peak_MC[ind], bins = bins, weights = wgts)
-                lag_peak_wgts = hist[1][np.argmax(hist[0])]
+                hist = np.histogram(lag_peak_MC[ind], bins = 50, weights = wgts)
                 
-                # smooth the posterier histgram to find the local minimum around the primary peak
-                X = lag_peak_MC[ind][:, np.newaxis]
-                X_plot = np.linspace(self.tau_min, self.tau_max, len(lag_peak_MC[ind]))[:, np.newaxis]
-                self.X_peak_plot = X_plot
-                kde = KernelDensity(kernel = 'gaussian', bandwidth = self.nsmooth_wgts).fit(X)
-                profile = np.exp(kde.score_samples(X_plot))
-                self.peak_profile = profile
+                # smooth the weighted posterier histogram to find the local minimum and primary peak
+                if np.sum(wgts) == 0:
+                    wgts = np.ones(len(wgts))
+                    print("weights is not applied due to the zero weights!")
+                kde = sst.gaussian_kde(lag_peak_MC[ind], weights = wgts)
+                kde.set_bandwidth(bw_method = kde.factor * self.nsmooth_wgts)
+                tt = np.linspace(hist[1].min(),hist[1].max(),1000)
+                self.lag_peak_kde = tt
+                peak_kde = kde.evaluate(tt)
+                self.peak_kde = peak_kde
+                lag_peak_wgts = tt[np.argmax(peak_kde)]
+               
                 
                 # find every local minimum in 1D array
-                loc_min = profile[np.r_[True, profile[1:] < profile[:-1]] & np.r_[profile[:-1] < profile[1:], True]]
-                loc_min_ind =  np.r_[True, profile[1:] < profile[:-1]] & np.r_[profile[:-1] < profile[1:], True]
+                loc_min = peak_kde[np.r_[True, peak_kde[1:] < peak_kde[:-1]] & np.r_[peak_kde[:-1] < peak_kde[1:], True]]
+                loc_min_ind = np.r_[True, peak_kde[1:] < peak_kde[:-1]] & np.r_[peak_kde[:-1] < peak_kde[1:], True]
                 # find the nearest left and right minimum around peak
                 try:
-                    self.peak_left = np.max(X_plot[:, 0][loc_min_ind][np.where(X_plot[:, 0][loc_min_ind]<lag_peak_wgts)])
+                    self.peak_left = np.max(tt[loc_min_ind][np.where(tt[loc_min_ind]<lag_peak_wgts)])
                 except:
                     self.peak_left = self.tau_min
                 try:
-                    self.peak_right = np.min(X_plot[:, 0][loc_min_ind][np.where(X_plot[:, 0][loc_min_ind]>lag_peak_wgts)])
+                    self.peak_right = np.min(tt[loc_min_ind][np.where(tt[loc_min_ind]>lag_peak_wgts)])
                 except:
                     self.peak_right = self.tau_max
                 region = np.where( (lag_peak_MC[ind] >self.peak_left) & (lag_peak_MC[ind]<self.peak_right), True, False)
@@ -621,33 +589,40 @@ class CCF():
                 peak_pack_MC = np.array([lag_peak_low, lag_peak, lag_peak_high])
                 self.lag_peak_MC_weighted = lag_peak_MC[ind][region]
                 
+                
+                
                 #------------------------------------------------------------------------
-                # find weighted centroid distribution
+                # find weighted cen distribution
                 wgts = np.interp(lag_cen_MC[ind], self.lag, self.weighting)
-                #lag_cen_wgts = self.weighted_percentile(lag_cen_MC[ind], 50, wgts = wgts)
-                bins = np.arange(lag_cen_MC[ind].min(), lag_cen_MC[ind].max(), (lag_cen_MC[ind].max()-lag_cen_MC[ind].min())/100.)
-                hist = np.histogram(lag_cen_MC[ind], bins = bins, weights = wgts)
-                lag_cen_wgts = hist[1][np.argmax(hist[0])]
+                hist = np.histogram(lag_cen_MC[ind], bins = 50, weights = wgts)
 
-                #smooth the posterier histgram
-                X = lag_cen_MC[ind][:, np.newaxis]
-                X_plot = np.linspace(self.tau_min, self.tau_max, len(lag_cen_MC[ind]))[:, np.newaxis]
-                self.X_cen_plot = X_plot
-                kde = KernelDensity(kernel = 'gaussian', bandwidth = self.nsmooth_wgts).fit(X)
-                profile = np.exp(kde.score_samples(X_plot))
-                self.cen_profile = profile
+                # smooth the weighted posterier histogram
+                if np.sum(wgts) == 0:
+                    wgts = np.ones(len(wgts))
+                    print("weights is not applied due to the zero weights!")
+                kde = sst.gaussian_kde(lag_cen_MC[ind], weights = wgts)
+                kde.set_bandwidth(bw_method = kde.factor * self.nsmooth_wgts)
+                tt = np.linspace(hist[1].min(),hist[1].max(),1000)
+                self.lag_cen_kde = tt
+                cen_kde = kde.evaluate(tt)
+                self.cen_kde = cen_kde
+                lag_cen_wgts = tt[np.argmax(cen_kde)]
+                
                 
                 #find every local minimum in 1D array
-                loc_min = profile[np.r_[True, profile[1:] < profile[:-1]] & np.r_[profile[:-1] < profile[1:], True]]
-                loc_min_ind =  np.r_[True, profile[1:] < profile[:-1]] & np.r_[profile[:-1] < profile[1:], True]
+                loc_min = cen_kde[np.r_[True, cen_kde[1:] < cen_kde[:-1]] & np.r_[cen_kde[:-1] < cen_kde[1:], True]]
+                loc_min_ind = np.r_[True, cen_kde[1:] < cen_kde[:-1]] & np.r_[cen_kde[:-1] < cen_kde[1:], True]
+                
+                
                 try:
-                    self.cen_left = np.max(X_plot[:, 0][loc_min_ind][np.where(X_plot[:, 0][loc_min_ind]<lag_cen_wgts)])
+                    self.cen_left = np.max(tt[loc_min_ind][np.where(tt[loc_min_ind]<lag_cen_wgts)])
                 except:
                     self.cen_left = self.tau_min
                 try:
-                    self.cen_right = np.min(X_plot[:, 0][loc_min_ind][np.where(X_plot[:, 0][loc_min_ind]>lag_cen_wgts)])
+                    self.cen_right = np.min(tt[loc_min_ind][np.where(tt[loc_min_ind]>lag_cen_wgts)])
                 except:
                     self.cen_right = self.tau_max
+                
                 region = np.where( (lag_cen_MC[ind] >self.cen_left) & (lag_cen_MC[ind]<self.cen_right), True, False)
                 lag_cen_low = np.round(np.percentile(lag_cen_MC[ind][region], 50)-np.percentile(lag_cen_MC[ind][region], 16), 2)
                 lag_cen_high = np.round(np.percentile(lag_cen_MC[ind][region], 84)-np.percentile(lag_cen_MC[ind][region], 50), 2)
@@ -771,18 +746,7 @@ class CCF():
                 with quiet():
                     model = cm.CarmaModel(self.t2, self.y2, self.e2, p = self.p2, q = self.q2)
                     self.sample2 = model.run_mcmc(self.mcmc_nsamples)
-                    '''
-                    time = np.linspace(self.t2.min(), self.t2.max(), 1000)
-                    model_mean, model_var = self.sample2.predict(time, bestfit = 'map')
-                    plt.plot(time, model_mean, '-b', lw = 1)
-                    low = model_mean - np.sqrt(model_var)
-                    high = model_mean + np.sqrt(model_var)
-                    plt.fill_between(time, low, high, facecolor = 'blue', alpha = 0.2)
-                    time = np.linspace(self.t2.min(), self.t2.max()+1000, 1000)
-                    ysim = self.sample2.simulate(time, bestfit = 'map')
-                    plt.plot(time, ysim, 'r', lw = 1)
-                    plt.errorbar(self.t2, self.y2, yerr = self.e2, fmt = '.', color = 'k')
-                    '''
+                    
         # produce 100x long LC and randomly select a segment from 10 to 100 and impose the same cadence and errors
         n1 = 0
         for i in range(sim_ntrials/2):
@@ -850,17 +814,7 @@ class CCF():
 
             ysim_t1_cadence.append(y1_sim)
             
-            '''
-            plt.figure(figsize = (15, 5))
-            plt.errorbar(self.t1, self.y1, yerr = self.e1, fmt = '.', color = 'k', lw = 1)
-            t = np.linspace(6600, 20000, 1000)
-            yy = sample.simulate(t, bestfit = 'map')
-            plt.plot(t, yy, 'grey', alpha = 0.5)
-            plt.plot(t[500:600], yy[500:600], 'r', alpha = 0.8)
-            plt.xlabel('Time')
-            plt.ylabel('Flux')
-            #break
-            '''
+           
         ysim_t1_cadence = np.array(ysim_t1_cadence).reshape(-1, len(self.t1))
         self.ysim_t1_cadence = np.array(ysim_t1_cadence)
         
@@ -871,7 +825,6 @@ class CCF():
             r_sim2_all = []
             
             # measure the CCF for the simulated and real LCs
-            #plt.figure(figsize = (8, 6))
             for i in range(len(ysim_t2_cadence)):
                 lagsim, rsim, nptsim = self.ICCF_CARMA(self.t1, self.y1, self.e1, self.t2, ysim_t2_cadence[i], self.e2, tau_min = self.tau_min, 
                                                        tau_max = self.tau_max, step = self.step, 
@@ -879,12 +832,7 @@ class CCF():
                                                        q1 = self.q1, p2 = self.p2, q2 = self.q2, carma_model = self.carma_model, imode = self.imode)
                 lag_sim2_all.append(lagsim)
                 r_sim2_all.append(rsim)
-                #plt.errorbar(self.t2, ysim_t2_cadence[i], yerr = self.e2, color = 'k', marker = '.', alpha = 0.1)
-            #plt.errorbar(self.t2, self.y2, yerr = self.e2, color = 'r', marker = '.')
-            #plt.errorbar(self.t1, self.y1*10., yerr = self.e1, color = 'b', marker = '.')
-            #plt.ylabel('Flux')
-            #plt.xlabel('Time')
-            
+                
             lag_sim2_all = np.array(lag_sim2_all)
             r_sim2_all = np.array(r_sim2_all)
 
@@ -900,10 +848,6 @@ class CCF():
                                                        q1 = self.q1, p2 = self.p2, q2 = self.q2, carma_model = self.carma_model, imode = self.imode)
                 lag_sim1_all.append(lagsim)
                 r_sim1_all.append(rsim)
-                
-                #plt.plot(self.t1, ysim_t1_cadence[j], 'k.', alpha = 0.1)
-            #plt.plot(self.t2, self.y2/10., 'r.')
-            #plt.plot(self.t1, self.y1, 'b.')
             
             lag_sim1_all = np.array(lag_sim1_all)
             r_sim1_all = np.array(r_sim1_all)
@@ -970,10 +914,47 @@ class CCF():
         self.r_sim_cen = np.array(r_sim_cen)
         return lag_sim, r_sim
     
+    def CalSig_Other_Peak(self, low1, high1, low2 = None, high2 = None):
+        '''
+        calculate the significance of other peaks
+        low1, high1: to search a secondary peak in [low1, high1]
+        low2, high2: to calculate the significance in [low2, high2]
+        '''
+        try:
+            if low2 == None:
+                low2 = 0
+            if high2 == None:
+                high2 = self.tau_max
+                
+            ind = np.where( (self.lag>low1) & (self.lag<high1), True, False)
+            lag = np.argmax(self.r[ind].max())
+            r = self.r[ind].max()
+
+            lag_peak = []
+            r_peak = []
+            for i in range(self.r_sim.shape[0]):
+                lag_peak.append(self.lag_sim[i,:][np.argmax(self.r_sim[i,:])])
+                r_peak.append(np.max(self.r_sim[i,:]))
+            lag_peak=np.array(lag_peak)
+            r_peak=np.array(r_peak)
+
+            idx = np.where((lag_peak > low2) & (lag_peak < high2), True, False)
+            idx2 = np.where((lag_peak > low2) & (lag_peak < high2) & (r > r_peak), True, False)
+
+            return 1. - float(np.sum(idx2))/float(np.sum(idx))
+        except:
+            raise Exception("nsim_trials must be >= 2!")
+    
     def PlotLC(self):
         # plot the orignial/detrened light curve and their CARMA model used for interpolation.
         plt.figure(figsize = (15, 10))
+        plt.subplots_adjust(hspace=0)
         # plot contimuum ------------------------------
+        if self.shift == 'peak':
+            offset = self.peak_pack_MC[1]
+        else:
+            offset = self.cen_pack_MC[1]
+        xmin,xmax = min(self.t1.min(),self.t2.min()-offset), max(self.t1.max(),self.t2.max()-offset)
         ax = plt.subplot(311)
         if self.interp == 'carma':
             plt.errorbar(self.t1, self.y1, yerr = self.e1, fmt = '.', color = 'k', lw = 1)    
@@ -990,12 +971,15 @@ class CCF():
                     plt.plot(time, ysim, 'b-')
             except:
                 pass
-            plt.title(self.name+':  interp = '+self.interp+', CarmaModel = '+str(self.carma_model)+', p1 = '+str(self.p1)+', q1 = '+str(self.q1)+', p2 = '+str(self.p2)+', q2 = '+str(self.q2) )
+            plt.title(self.name+':  interp = '+self.interp+', CarmaModel = '+str(self.carma_model)+', p1 = '+str(self.p1)+', q1 = '+str(self.q1)+', p2 = '+str(self.p2)+', q2 = '+str(self.q2)+', detrend = '+str(self.detrend) )
         else:
-            plt.errorbar(self.t1, self.y1, yerr = self.e1, fmt = '.-', color = 'k', lw = 1)  
-            plt.title(self.name+':  interp = '+self.interp)
+            plt.errorbar(self.t1, self.y1, yerr = self.e1, fmt = '.', color = 'k', lw = 1)
+            plt.errorbar(self.t1, self.y1, yerr = self.e1, fmt = '-', color = 'k', lw=1, alpha=0.2)
+            plt.title(self.name+':  interp = '+self.interp+', detrend = '+ str(self.detrend))
+        plt.text(0.8, 0.9, r'$\rm VAR_{SNR}$ = '+str(np.round(self.var_sn1, 1)), fontsize=16, transform = ax.transAxes)
         plt.ylabel('Flux')
-       
+        plt.xticks([])
+        plt.xlim(xmin,xmax)
         # plot emission line ----------------------------
         ax = plt.subplot(312)
         if self.interp == 'carma':
@@ -1014,20 +998,21 @@ class CCF():
             except:
                     pass
         else:
-            plt.errorbar(self.t2, self.y2, yerr = self.e2, fmt = '.-', color = 'k', lw = 1) 
+            plt.errorbar(self.t2, self.y2, yerr = self.e2, fmt = '.', color = 'k', lw = 1)
+            plt.errorbar(self.t2, self.y2, yerr = self.e2, fmt = '-', color = 'k', lw = 1, alpha = 0.1)
+        plt.text(0.8, 0.9, r'$\rm VAR_{SNR}$ = '+str(np.round(self.var_sn2, 1)), fontsize=16, transform = ax.transAxes)
         plt.ylabel('Flux')
-            
+        plt.xticks([])
+        plt.xlim(xmin,xmax) 
+        
         # plot normalized LCs--------------------------
         ax = plt.subplot(313)
-        if self.shift == 'peak':
-            offset = self.peak_pack_MC[1]
-        else:
-            offset = self.cen_pack_MC[1]
-        plt.errorbar(self.t1, self.y1*(self.y2.mean()/self.y1.mean()), yerr = self.e1, fmt = '.', color = 'b', label = 'cont' )
-        plt.errorbar(self.t2-offset, self.y2, yerr = self.e2, fmt = '.', color = 'r', label = 'line')
+        plt.errorbar(self.t1, (self.y1-self.y1.mean())*self.y2.std()/self.y1.std(), yerr = self.e1, fmt = '.', color = 'b', label = 'cont' )
+        plt.errorbar(self.t2-offset, self.y2-self.y2.mean() , yerr = self.e2, fmt = '.', color = 'r', label = 'line')
         plt.text(0.8, 0.1, 'offset = '+ str(offset), transform = ax.transAxes, fontsize = 16)
         plt.ylabel('Flux')
         plt.xlabel('Time')
+        plt.xlim(xmin,xmax)
         plt.legend(fontsize=16)
         plt.tight_layout()
         
@@ -1050,7 +1035,7 @@ class CCF():
             plt.xlabel('Lag (days)')
             plt.ylabel('r')
             plt.text(0.01, 0.9, r'$\rm \tau_{peak} = $'+str(np.round(self.lag_peak, 2)), transform = ax.transAxes, fontsize = 16)
-            plt.text(0.01, 0.8, r'$\rm \tau_{cen} = $'+str(np.round(self.lag_cen, 2)), transform = ax.transAxes, fontsize = 16)
+            plt.text(0.01, 0.8, r'$\rm \tau_{cent} = $'+str(np.round(self.lag_cen, 2)), transform = ax.transAxes, fontsize = 16)
             plt.tight_layout()
         else:
             if self.sim_ntrials >1: 
@@ -1073,7 +1058,7 @@ class CCF():
             plt.xlabel('Lag (days)')
             plt.ylabel('r')
             plt.text(0.01, 0.9, r'$\rm \tau_{peak} = $'+str(np.round(self.lag_peak, 2)), transform = ax.transAxes, fontsize = 16)
-            plt.text(0.01, 0.8, r'$\rm \tau_{cen} = $'+str(np.round(self.lag_cen, 2)), transform = ax.transAxes, fontsize = 16)
+            plt.text(0.01, 0.8, r'$\rm \tau_{cent} = $'+str(np.round(self.lag_cen, 2)), transform = ax.transAxes, fontsize = 16)
             
             # ------------------------------------------------------------------------------------------------------------------------
             # plot error panel
@@ -1082,19 +1067,16 @@ class CCF():
                 ax = plt.subplot(2, 6, (3, 4))
             else:
                 ax = plt.subplot(1, 6, (3, 4))
-            try:
-                bins = np.arange(self.lag_peak_MC.min(), self.lag_peak_MC.max(), (self.lag_peak_MC.max()-self.lag_peak_MC.min())/100.)
-            except:
-                bins = None
-            hist = plt.hist(self.lag_peak_MC, bins = bins, histtype = 'step', lw = 2, alpha = 0.8)
+            
+            plt.hist(self.lag_peak_MC, bins = 50, histtype = 'step', lw = 2, alpha = 0.8)
             
             if self.weight == True:
                 weights = np.interp(self.lag_peak_MC, self.lag, self.weighting)
-                plt.hist(self.lag_peak_MC, weights = weights, bins = bins, color = 'g', histtype = 'step', ls = 'dashed', lw = 2, alpha = 0.5)
+                hist = plt.hist(self.lag_peak_MC, weights = weights, bins = 50, color = 'g', histtype = 'step', ls = 'dashed', lw = 2, alpha = 0.5)
                 plt.axvspan(self.peak_left, self.peak_right, alpha = 0.1, color = 'grey')
-                fc = (hist[0].max()/self.peak_profile.max())
-                idx = np.where(self.peak_profile*fc>0.01, True, False)
-                plt.plot(self.X_peak_plot[idx], self.peak_profile[idx]*fc, alpha = 0.5)
+                fc = (hist[0].max()/self.peak_kde.max())
+                idx = np.where(self.peak_kde*fc>0.01, True, False)
+                plt.plot(self.lag_peak_kde[idx], self.peak_kde[idx]*fc, alpha = 0.5)
 
             plt.xlabel('Peak Lag (days)')
             plt.ylabel('Number')
@@ -1113,18 +1095,15 @@ class CCF():
                 ax = plt.subplot(2, 6, (5, 6))
             else:
                 ax = plt.subplot(1, 6, (5, 6))
-            try:
-                bins = np.arange(self.lag_cen_MC.min(), self.lag_cen_MC.max(), (self.lag_cen_MC.max()-self.lag_cen_MC.min())/100.)
-            except:
-                bins = None
-            hist = plt.hist(self.lag_cen_MC, bins = bins, histtype = 'step', lw = 2, alpha = 0.8)
+
+            plt.hist(self.lag_cen_MC, bins = 50, histtype = 'step', lw = 2, alpha = 0.8)
             if self.weight == True:
                 weights = np.interp(self.lag_cen_MC, self.lag, self.weighting)
-                plt.hist(self.lag_cen_MC, weights = weights, bins = bins, color = 'g', histtype = 'step', ls = 'dashed', lw = 2, alpha = 0.5)
+                hist = plt.hist(self.lag_cen_MC, weights = weights, bins = 50, color = 'g', histtype = 'step', ls = 'dashed', lw = 2, alpha = 0.5)
                 plt.axvspan(self.cen_left, self.cen_right, alpha = 0.1, color = 'grey')
-                fc = (hist[0].max()/self.cen_profile.max())
-                idx = np.where(self.cen_profile*fc>0.01, True, False)
-                plt.plot(self.X_cen_plot[idx], self.cen_profile[idx]*fc, alpha = 0.5)
+                fc = (hist[0].max()/self.cen_kde.max())
+                idx = np.where(self.cen_kde*fc>0.01, True, False)
+                plt.plot(self.lag_cen_kde[idx], self.cen_kde[idx]*fc, alpha = 0.5)
             plt.xlabel('Centroid Lag (days)')
             plt.ylabel('Number')
             ymin, ymax = plt.ylim()
@@ -1132,7 +1111,7 @@ class CCF():
             plt.plot([self.cen_pack_MC[1], self.cen_pack_MC[1]], [ymin, ymax], 'r--')
             plt.plot([self.cen_pack_MC[1]-self.cen_pack_MC[0], self.cen_pack_MC[1]-self.cen_pack_MC[0]], [ymin, ymax], 'r:')
             plt.plot([self.cen_pack_MC[1]+self.cen_pack_MC[2], self.cen_pack_MC[1]+self.cen_pack_MC[2]], [ymin, ymax], 'r:')
-            plt.text(0.01, 0.9, r'$\rm \tau_{cen} = '+str(np.round(self.cen_pack_MC[1], 2))+'^{+'+str(np.round(self.cen_pack_MC[2], 2))+'}'+'_{-'+str(np.round(self.cen_pack_MC[0], 2))+'}$', transform = ax.transAxes, fontsize = 15)
+            plt.text(0.01, 0.9, r'$\rm \tau_{cent} = '+str(np.round(self.cen_pack_MC[1], 2))+'^{+'+str(np.round(self.cen_pack_MC[2], 2))+'}'+'_{-'+str(np.round(self.cen_pack_MC[0], 2))+'}$', transform = ax.transAxes, fontsize = 15)
             plt.ylim(ymin, ymax)
             
             # -------------------------------------------------------------------------------------------------------------------------------
@@ -1159,7 +1138,7 @@ class CCF():
                 
                 # for legend
                 plt.hist([], np.arange(-2, -1), histtype = 'step', label = 'peak')
-                plt.hist([], np.arange(-2, -1), histtype = 'step', label = 'cen')
+                plt.hist([], np.arange(-2, -1), histtype = 'step', label = 'cent')
                 plt.plot([], [], 'g', label = r'$\rm 1\sigma$')
                 plt.plot([], [], 'm', label = r'$\rm 2\sigma$')
                 plt.plot([], [], 'b', label = r'$\rm 3\sigma$')
@@ -1186,8 +1165,19 @@ class CCF():
             plt.savefig(self.path+self.name+'_CCF.pdf')
         
     def SaveResults(self):
-        if self.MC_ntrials >0 and self.sim_ntrials>1:
+        if self.sim_ntrials <2:
+            self.p_positive = 0
+            self.p_peak = 0
+            self.p_all =0
+            self.r_sim_peak = np.zeros(1)
+            self.r_sim_cen = np.zeros(1)
+            self.lag_sim = np.zeros(2).reshape(2,-1)
+            self.r_sim = np.zeros(2).reshape(2,-1)
+            self.ysim_t1_cadence = np.zeros(2).reshape(2,-1)
+            self.ysim_t2_cadence = np.zeros(2).reshape(2,-1)
             
+        if self.MC_ntrials >0: 
+            #  ------1st extension---------
             c1 = fits.Column(name = 'Name', array = np.array([self.name]), format = '20A')
             c2 = fits.Column(name = 'interpolation', array = np.array([self.interp]), format = '20A')
             c3 = fits.Column(name = 'carma_model', array = np.array([self.carma_model]), format = '20A')
@@ -1218,54 +1208,55 @@ class CCF():
             c26 = fits.Column(name = 'p_all', array = np.array([self.p_all]), format = 'F')
             c27 = fits.Column(name = 'p_peak', array = np.array([self.p_peak]), format = 'F')
             c28 = fits.Column(name = 'failed_CCF_MC', array = np.array([self.failed_CCF_MC]), format = 'F')
+            c29 = fits.Column(name = 'VAR_SN1', array = np.array([self.var_sn1]), format = 'F')
+            c30 = fits.Column(name = 'VAR_SN2', array = np.array([self.var_sn2]), format = 'F')
+            
+            #---2rd extension--------------------
+            c31 = fits.Column(name = 't1', array = self.t1, format = 'F')
+            c32 = fits.Column(name = 'y1', array = self.y1, format = 'F')
+            c33 = fits.Column(name = 'e1', array = self.e1, format = 'F')
+            c34 = fits.Column(name = 't2', array = self.t2, format = 'F')
+            c35 = fits.Column(name = 'y2', array = self.y2, format = 'F')
+            c36 = fits.Column(name = 'e2', array = self.e2, format = 'F')
 
-            #--------------------
-            c29 = fits.Column(name = 't1', array = self.t1, format = 'F')
-            c30 = fits.Column(name = 'y1', array = self.y1, format = 'F')
-            c31 = fits.Column(name = 'e1', array = self.e1, format = 'F')
-            c32 = fits.Column(name = 't2', array = self.t2, format = 'F')
-            c33 = fits.Column(name = 'y2', array = self.y2, format = 'F')
-            c34 = fits.Column(name = 'e2', array = self.e2, format = 'F')
-
-            c35 = fits.Column(name = 'lag', array = self.lag, format = 'F')
-            c36 = fits.Column(name = 'r', array = self.r, format = 'F')
-            c37 = fits.Column(name = 'npt', array = self.npt, format = 'F')
+            c37 = fits.Column(name = 'lag', array = self.lag, format = 'F')
+            c38 = fits.Column(name = 'r', array = self.r, format = 'F')
+            c39 = fits.Column(name = 'npt', array = self.npt, format = 'F')
             
             if self.imode !=2:
-                c38 = fits.Column(name = 'r_1', array = self.r_1, format = 'F')
-                c39 = fits.Column(name = 'npt_1', array = self.npt_1, format = 'F')
+                c40 = fits.Column(name = 'r_1', array = self.r_1, format = 'F')
+                c41 = fits.Column(name = 'npt_1', array = self.npt_1, format = 'F')
             else:
-                c38 = fits.Column(name = 'r_1', array = np.array([]), format = 'F')
-                c39 = fits.Column(name = 'npt_1', array = np.array([]), format = 'F')
+                c40 = fits.Column(name = 'r_1', array = np.array([]), format = 'F')
+                c41 = fits.Column(name = 'npt_1', array = np.array([]), format = 'F')
             if self.imode !=1:
-                c40 = fits.Column(name = 'r_2', array = self.r_2, format = 'F')
-                c41 = fits.Column(name = 'npt_2', array = self.npt_2, format = 'F')
+                c42 = fits.Column(name = 'r_2', array = self.r_2, format = 'F')
+                c43 = fits.Column(name = 'npt_2', array = self.npt_2, format = 'F')
             else:
-                c40 = fits.Column(name = 'r_2', array = np.array([]), format = 'F')
-                c41 = fits.Column(name = 'npt_2', array = np.array([]), format = 'F')
+                c42 = fits.Column(name = 'r_2', array = np.array([]), format = 'F')
+                c43 = fits.Column(name = 'npt_2', array = np.array([]), format = 'F')
                 
-            c42 = fits.Column(name = 'lag_peak_MC', array = self.lag_peak_MC, format = 'F')
-            c43 = fits.Column(name = 'lag_cen_MC', array = self.lag_cen_MC, format = 'F')
-            c44 = fits.Column(name = 'r_sim_peak', array = self.r_sim_peak, format = 'F')
-            c45 = fits.Column(name = 'r_sim_cen', array = self.r_sim_cen, format = 'F')
+            c44 = fits.Column(name = 'lag_peak_MC', array = self.lag_peak_MC, format = 'F')
+            c45 = fits.Column(name = 'lag_cen_MC', array = self.lag_cen_MC, format = 'F')
+            c46 = fits.Column(name = 'r_sim_peak', array = self.r_sim_peak, format = 'F')
+            c47 = fits.Column(name = 'r_sim_cen', array = self.r_sim_cen, format = 'F')
             
-            
-            c46 = fits.Column(name = 'lag_sim', array = self.lag_sim, dim = '('+str(self.lag_sim.shape[1])+')', format = str(self.lag_sim.shape[1])+'E')
-            c47 = fits.Column(name = 'r_sim', array = self.r_sim, dim = '('+str(self.r_sim.shape[1])+')', format = str(self.r_sim.shape[1])+'E')
-            c48 = fits.Column(name = 'ysim_t1_cadence', array = self.ysim_t1_cadence, dim = '('+str(self.ysim_t1_cadence.shape[1])+')', format = str(self.ysim_t1_cadence.shape[1])+'E')
-            c49 = fits.Column(name = 'ysim_t2_cadence', array = self.ysim_t2_cadence, dim = '('+str(self.ysim_t2_cadence.shape[1])+')', format = str(self.ysim_t2_cadence.shape[1])+'E')
+            c48 = fits.Column(name = 'lag_sim', array = self.lag_sim, dim = '('+str(self.lag_sim.shape[1])+')', format = str(self.lag_sim.shape[1])+'E')
+            c49 = fits.Column(name = 'r_sim', array = self.r_sim, dim = '('+str(self.r_sim.shape[1])+')', format = str(self.r_sim.shape[1])+'E')
+            c50 = fits.Column(name = 'ysim_t1_cadence', array = self.ysim_t1_cadence, dim = '('+str(self.ysim_t1_cadence.shape[1])+')', format = str(self.ysim_t1_cadence.shape[1])+'E')
+            c51 = fits.Column(name = 'ysim_t2_cadence', array = self.ysim_t2_cadence, dim = '('+str(self.ysim_t2_cadence.shape[1])+')', format = str(self.ysim_t2_cadence.shape[1])+'E')
             
             # produce fits
             ex0 = fits.PrimaryHDU()
-            ex1 = fits.BinTableHDU.from_columns([c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, c18, c19, c20, c21, c22, c23, c24, c25, c26, c27, c28])
+            ex1 = fits.BinTableHDU.from_columns([c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, c18, c19, c20, c21, c22, c23, c24, c25, c26, c27, c28, c29, c30])
             
             if self.weight == True:
-                c50 = fits.Column(name = 'weighting', array = self.weighting, format = 'F')
-                c51 = fits.Column(name = 'lag_ACF', array = self.lag_ACF, format = 'F')
-                c52 = fits.Column(name = 'r_ACF', array = self.r_ACF, format = 'F')
-                ex2 = fits.BinTableHDU.from_columns([c29, c30, c31, c32, c33, c34, c35, c36, c37, c38, c39, c40, c41, c42, c43, c44, c45, c46, c47, c48, c49, c50, c51, c52])
+                c52 = fits.Column(name = 'weighting', array = self.weighting, format = 'F')
+                c53 = fits.Column(name = 'lag_ACF', array = self.lag_ACF, format = 'F')
+                c54 = fits.Column(name = 'r_ACF', array = self.r_ACF, format = 'F')
+                ex2 = fits.BinTableHDU.from_columns([c31, c32, c33, c34, c35, c36, c37, c38, c39, c40, c41, c42, c43, c44, c45, c46, c47, c48, c49, c50, c51, c52, c53, c54])
             else:
-                ex2 = fits.BinTableHDU.from_columns([c29, c30, c31, c32, c33, c34, c35, c36, c37, c38, c39, c40, c41, c42, c43, c44, c45, c46, c47, c48, c49])
+                ex2 = fits.BinTableHDU.from_columns([c31, c32, c33, c34, c35, c36, c37, c38, c39, c40, c41, c42, c43, c44, c45])
             
             if self.lite == False:
                 hdul = fits.HDUList([ex0, ex1, ex2])
