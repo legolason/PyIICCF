@@ -708,26 +708,30 @@ class CCF():
         lock.release()
         
    
-    def _job2(self, ysim_t2_cadence):
+    def _job2(self, nn2_ysim_t2_cadence):
         np.random.seed()
+        n, ysim_t2_cadence = nn2_ysim_t2_cadence
         # multiprocess job function for CalSig, simulated y2
         lagsim, rsim, nptsim = self.ICCF_CARMA(self.t1, self.y1, self.e1, self.t2, ysim_t2_cadence, self.e2, tau_min = self.tau_min, 
                                                tau_max = self.tau_max, step = self.step, 
                                                interp = self.interp, mcmc_nsamples = self.mcmc_nsamples, p1 = self.p1, 
                                                q1 = self.q1, p2 = self.p2, q2 = self.q2, carma_model = self.carma_model, imode = self.imode)
         lock.acquire()
+        n2.append(n)
         lag_sim2_a.append(lagsim)
         r_sim2_a.append(rsim)
         lock.release()
     
-    def _job3(self, ysim_t1_cadence):
+    def _job3(self, nn1_ysim_t1_cadence):
         np.random.seed()
+        n, ysim_t1_cadence = nn1_ysim_t1_cadence
         # multiprocess job function for CalSig, simulated y1
         lagsim, rsim, nptsim = self.ICCF_CARMA(self.t1, ysim_t1_cadence, self.e1, self.t2, self.y2, self.e2, tau_min = self.tau_min, 
                                                tau_max = self.tau_max, step = self.step, 
                                                interp = self.interp, mcmc_nsamples = self.mcmc_nsamples, p1 = self.p1, 
                                                q1 = self.q1, p2 = self.p2, q2 = self.q2, carma_model = self.carma_model, imode = self.imode)
         lock.acquire()
+        nn1.append(n)
         lag_sim1_a.append(lagsim)
         r_sim1_a.append(rsim)
         lock.release()
@@ -853,26 +857,32 @@ class CCF():
             r_sim1_all = np.array(r_sim1_all)
         else:
             #multiprocessing
-            global loop, lag_sim1_a, lag_sim2_a, r_sim1_a, r_sim2_a
+            global loop, lag_sim1_a, lag_sim2_a, r_sim1_a, r_sim2_a, nn1, nn2
             loop = 2 # go job2
             lag_sim1_a = manager.list([])
             lag_sim2_a = manager.list([])
             r_sim1_a = manager.list([])
             r_sim2_a = manager.list([])
+            nn1 = manager.list([])
+            nn2 = manager.list([])
             p2 = Pool()
-            p2.map(self, ysim_t2_cadence)
+            
+            p2.map(self, zip(range(len(ysim_t2_cadence)), ysim_t2_cadence))
             p2.close()
             p2.join()
-            lag_sim2_all = np.array(list(lag_sim2_a))
-            r_sim2_all = np.array(list(r_sim2_a))
+            lag_sim2_all = np.array(list(lag_sim2_a))[np.argsort(nn2)]
+            r_sim2_all = np.array(list(r_sim2_a))[np.argsort(nn2)]
             
             loop = 3 # go job3
             p3 = Pool()
-            p3.map(self, ysim_t1_cadence)
+            p3.map(self, zip(range(len(ysim_t2_cadence)), ysim_t1_cadence))
             p3.close()
             p3.join()
-            lag_sim1_all = np.array(list(lag_sim1_a))
-            r_sim1_all = np.array(list(r_sim1_a))
+            
+            
+            lag_sim1_all = np.array(list(lag_sim1_a))[np.argsort(nn1)]
+            r_sim1_all = np.array(list(r_sim1_a))[np.argsort(nn1)]
+            
         
         # save all the simulated CCF, 1 means simulated y1, 2 means simulated y2
         lag_sim = np.array(np.vstack((lag_sim1_all, lag_sim2_all)))
