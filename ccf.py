@@ -717,7 +717,7 @@ class CCF():
                                                interp = self.interp, mcmc_nsamples = self.mcmc_nsamples, p1 = self.p1, 
                                                q1 = self.q1, p2 = self.p2, q2 = self.q2, carma_model = self.carma_model, imode = self.imode)
         lock.acquire()
-        n2.append(n)
+        nn2.append(n)
         lag_sim2_a.append(lagsim)
         r_sim2_a.append(rsim)
         lock.release()
