@@ -1,0 +1,51 @@
+Ubuntu 16.04
+Python 2.7 from Anaconda2 
+
+cd /home/user/Downloads/boost_1_64_0
+#open terminal under boost_1_64_0
+./bootstrap.sh —prefix=/home/user/softwares/boost
+./b2
+
+#If success, shows
+“The Boost C++ libraries were successfully built!...
+
+sudo apt-get install libatlas-base-dev liblapack-dev cmake
+#install LAPACK or ATLAS before installing armadillo.
+
+cd ~
+vi .bashrc
+#write this into .bashrc:
+export BOOST_DIR=/home/user/softwares/boost
+source .bashrc
+
+Armadillo9.900.2:
+cd /home/user/Downloads/armadillo-9.900.2
+cmake -DCMAKE_INSTALL_PREFIX=/home/user/softwares/armadillo -DBOOST_ROOT=$BOOST_DIR/ .
+#check that LAPACK_FOUND=true, otherwise carmcmc can’t run tests
+
+make install
+
+cd ~
+vi .bashrc
+#write this into .bashrc#
+export ARMADILLO_DIR=/home/user/softwares/armadillo
+export NUMPY_DIR=/home/user/anaconda2/lib/python2.7/site-packages
+export LD_LIBRARY_PATH=/home/user/softwares/boost/lib:${LD_LIBRARY_PATH}
+export LD_LIBRARY_PATH=/home/user/softwares/armadillo/lib:${LD_LIBRARY_PATH}
+
+source .bashrc
+
+cd /home/user/Downloads/carma-pack-master/src
+
+#Check environment before setup, echo to make sure BOOST_DIR, LD_LIBRARY_PATH, etc...are correct.
+
+python setup.py install
+
+#if success, shows last line: 
+   Running install_clib
+
+pip install acor
+
+cd ./tests
+#run testCarmcmc.py
+python testCarmcmc.py
