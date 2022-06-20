@@ -1,8 +1,8 @@
 #A code to measure the time lag in reverberation mapping
-#Last modified on 10/3/2020
+#Last modified on 6/20/2022
 #Auther: Hengxiao Guo (UCI), Aaron Barth (UCI)
 #Email: hengxiaoguo AT gmail DOT com, barth AT uci DOT edu
-#version 1.0
+#version 1.3
 
 #Main function: measure the time lag (including lag uncertainty and significance) between
 #AGN continuum and emission line in reverberation mapping project. All the CARMA procedures
@@ -56,7 +56,7 @@ class CCF():
     def __init__(self):
         pass
     
-    def ICCF(self, t1, y1, e1, t2, y2, e2, tau_min = -100, tau_max = 100, step = 0.2, detrend = 0, interp = 'linear', mcmc_nsamples = 20000, auto_pq = False, p1 = 1, q1 = 0, p2 = 1, q2 = 0, carma_model = 'random', sig_cut = 0.8, imode = 0, MC_ntrials = 1000, FR_RSS = 0, sigmode = 0.2, weight = False, nsmooth_wgts = 1, sim_ntrials = 1000, scale_simLC = False, Nmodel = 2, MP = True, name = 'results', plotLC = True, shift = 'centroid', plotCCF = True, save = True, lite = True, path = './'):
+    def ICCF(self, t1, y1, e1, t2, y2, e2, tau_min = -100, tau_max = 100, step = 0.2, detrend = 0, interp = 'linear', mcmc_nsamples = 20000, auto_pq = False, p1 = 1, q1 = 0, p2 = 1, q2 = 0, carma_model = 'random', sig_cut = 0.8, imode = 0, MC_ntrials = 1000, FR_RSS = 0, sigmode = 0.2, weight = False, nsmooth_wgts = 1, sim_ntrials = 1000, sim_mode = 0, sim_var_range = 0.2, Nmodel = 2, MP = True, name = 'results', plotLC = True, shift = 'centroid', plotCCF = True, save = True, lite = True, path = './'):
         '''
         Main function will call other functions. This function is able to detrend the light curve, measure the time lag, 
         evaluate the lag uncertianties with Flux Randomization (FR) and Random Subset Sampling (RSS) and the significance with simulated CARMA Light Curves (LC).
@@ -100,10 +100,12 @@ class CCF():
             a scale factor multiply on the Gaussain bandwidth according to Scott's Rule n^(-0.2) [sigma], n is number of data points, for the lag posterier to decide the region (or local minimum around the primary peak) to calculate the lag and its uncertainties.
         sim_ntrials: interger
             n (even number, >2) trials of simulation to evaluate the lag significance. 0.5n trials are calculating the CCF between real continuum LC and simulated emission line LC, and the rest 0.5 is opposite.
-        scale_simLC: bool
-            scale the simulated LC to the same mean and variance as the original LC if True. The simuated LC will have same p and q as the orignial LC but may not the same variability amplitude, However, if True, we may change the amplitude of the PSD.
         Nmodel: interger
             n (even number, >=2) models to use to produce the simulated LCs. If n =2, one model to produce the simulated continuum LCs and another one is for the simulated emission-line LCs.
+        sim_var_range: float
+            the maximum fraction of the variability of the mock LCs can deviate from the actual variability in the real LCs. E.g., the standard deviation of LC 1 is 0.5, then the simulated variability should be between 0.5*(1-x) and 0.5*(1+x).
+        sim_mode: 0 or 1
+            if 0, significance test will calculate CCF with real y1 and simualted y2, then real y2 and simulated y1. If 1, CCF will be based on both simulated y1 and y2. 
         MP: Bool
             Multiprocessing with all CPUs if true.
         name: string
@@ -180,6 +182,7 @@ class CCF():
         self.MC_ntrials = MC_ntrials
         self.sim_ntrials = sim_ntrials
         self.weight = weight
+        self.sim_var_range = sim_var_range
         self.MP = MP
         self.plotLC = plotLC
         self.plotCCF = plotCCF
@@ -189,10 +192,10 @@ class CCF():
         self.FR_RSS = FR_RSS
         self.sigmode = sigmode
         self.lite = lite
-        self.scale_simLC = scale_simLC
         self.Nmodel = Nmodel
         self.nsmooth_wgts = nsmooth_wgts
         self.shift = shift
+        self.sim_mode = sim_mode
         
         
         # check parameters
@@ -205,6 +208,17 @@ class CCF():
         # check the light curve  
         if t1.shape[0] <10 or t2.shape[0] <10:
             raise Exception("The light curve should contain at least 10 data points!") 
+            
+        # avoid nan, inf in data
+        sm =  np.sum(np.isnan(self.t1)) + np.sum(np.isnan(self.t2)) + np.sum(np.isnan(self.y1)) + np.sum(np.isnan(self.y2))+ np.sum(np.isnan(self.e1)) + np.sum(np.isnan(self.e2))+ np.sum(np.isinf(self.t1)) + np.sum(np.isinf(self.t2))+ np.sum(np.isinf(self.y1)) + np.sum(np.isinf(self.y2)) + np.sum(np.isinf(self.e1)) + np.sum(np.isinf(self.e2))
+        if sm >0:
+            raise Exception("The light curve should not contain nan or inf data points!") 
+            
+        # avoid zero in errors        
+        if 0. in self.e1:
+            self.e1 = self.e1 + self.y1*1e-6 
+        if 0. in self.e2:
+            self.e2 = self.e2 + self.y2*1e-6 
         
         # sort the data according to date if they are not inceasing
         if np.sum(np.diff(self.t1)<0.0)>0 or np.sum(np.diff(self.t2)<0.0)>0:
@@ -216,6 +230,10 @@ class CCF():
         # calculate the variability SNR
         self.var_sn1 = np.sqrt(np.sum(((self.y1-np.median(self.y1))**2/self.e1**2)) - (len(self.y1)-1))
         self.var_sn2 = np.sqrt(np.sum(((self.y2-np.median(self.y2))**2/self.e2**2)) - (len(self.y2)-1))
+        if np.isnan(self.var_sn1):
+            self.var_sn1 = 0.0
+        if np.isnan(self.var_sn2):
+            self.var_sn2 = 0.0
         
             
         # choose the best p&q in carma model automatically for the LCs
@@ -237,18 +255,6 @@ class CCF():
             self.p2, self.q2 =  np.array(pqlist)[ind_finite][np.argmin(np.array(AICc)[ind_finite])]
             
 
-        # detrend with nth polynomial  
-        if detrend >0:
-            T = np.linspace(self.t1.min(), self.t1.max(), 1000)
-            cont = np.poly1d(np.polyfit(self.t1, self.y1, detrend))
-            cont_new = np.interp(self.t1, T, cont(T))
-            self.y1 = self.y1-cont_new+cont_new.mean()
-            #plt.subplot(211)
-            #plt.plot(T, cont(T), 'b') 
-            T = np.linspace(self.t2.min(), self.t2.max(), 1000)
-            line = np.poly1d(np.polyfit(self.t2, self.y2, detrend))
-            line_new = np.interp(self.t2, T, line(T))
-            self.y2 = self.y2-line_new+line_new.mean()
 
         # calculate ICCF with linear or CARMA model   
         global N
@@ -278,6 +284,18 @@ class CCF():
         # save results
         if self.save == True:
             self.SaveResults()
+    
+    def Detrend(self, t1, y1, t2, y2):
+        # detrend with nth polynomial  
+        T = np.linspace(t1.min(), t1.max(), 1000)
+        cont = np.poly1d(np.polyfit(t1, y1, self.detrend))
+        cont_new = np.interp(t1, T, cont(T))
+        y1 = y1-cont_new+cont_new.mean()
+        T = np.linspace(t2.min(), t2.max(), 1000)
+        line = np.poly1d(np.polyfit(t2, y2, self.detrend))
+        line_new = np.interp(t2, T, line(T))
+        y2 = y2-line_new+line_new.mean()
+        return t1, y1, t2, y2
         
     def ICCF_CARMA(self, t1, y1, e1, t2, y2, e2, tau_min = -100, tau_max = 100, step = 0.2, interp = 'linear', 
                    mcmc_nsamples = 20000, p1 = 1, q1 = 0, p2 = 1, q2 = 0, carma_model = 'random', imode = 0):
@@ -286,6 +304,11 @@ class CCF():
         This function returns the lag, CCF r and number of data points used in CCF
         """
         np.random.seed()
+        # If detrend > 0 do detrend for both LCs
+        if self.detrend > 0 :
+            t1, y1, t2, y2 = self.Detrend(t1, y1, t2, y2)
+        
+        
         # calculate ICCF
         # one bug: in carma p and q need to be reset
         lag_1, r_1, npt_1, lag_2, r_2, npt_2, = ([] for i in range(6))
@@ -407,26 +430,37 @@ class CCF():
         #peak
         np.random.seed()
         r_peak = max(r)
+        if N == 0:
+            self.rmax = r_peak
         r_peak_ind = np.argmax(r)
         lag_peak = lag[r_peak_ind]
         
         # centroid, we use the region contains the peak
-        spline = interpolate.UnivariateSpline(lag, r-self.sig_cut*r.max(), s = 0.)
         try:
+            spline = interpolate.UnivariateSpline(lag, r-self.sig_cut*r.max(), s = 0.)
             left = spline.roots()[np.where(lag_peak>spline.roots(), True, False)].max()
             right = spline.roots()[np.where(lag_peak<spline.roots(), True, False)].min()
             if N == 0:
-                self.right = right
-                self.left = left
-            ind = np.where( (lag <= right) & (lag >= left), True, False)
+                self.left, self.right = left, right
+            ind = np.where( (lag <= right.min()) & (lag >= left.max()), True, False)
             lag_cen = np.sum(r[ind]*lag[ind])/np.sum(r[ind])
             r_cen = r[np.where(lag  ==  lag[min(range(len(lag)), key = lambda i: abs(lag[i]-lag_cen))], True, False)][0]
         except:
-            # failed CCF
-            lag_cen, r_cen = -9999., -9999.
-            if N == 0:
-                self.right, self.left = 0., 0.
-            
+            try:
+                spline = interpolate.UnivariateSpline(lag, r-0.95*r.max(), s = 0.)
+                left = spline.roots()[np.where(lag_peak>spline.roots(), True, False)].max()
+                right = spline.roots()[np.where(lag_peak<spline.roots(), True, False)].min()
+                
+                if N == 0:
+                    self.left, self.right = left, right
+                ind = np.where( (lag <= right.min()) & (lag >= left.max()), True, False)
+                lag_cen = np.sum(r[ind]*lag[ind])/np.sum(r[ind])
+                r_cen = r[np.where(lag  ==  lag[min(range(len(lag)), key = lambda i: abs(lag[i]-lag_cen))], True, False)][0]
+            except:
+                # failed CCF
+                lag_cen, r_cen = -9999., -9999.
+                if N == 0:
+                    self.right, self.left = 0., 0.
         return lag_peak, lag_cen, r_peak, r_cen
     
     def Weight(self):
@@ -468,9 +502,9 @@ class CCF():
                     if self.FR_RSS == 0:
                         # both FR and RSS
                         # RSS
-                        id1 = np.random.randint(0, len(self.t1), len(self.t1))
+                        id1 = np.hstack((np.random.randint(0, len(self.t1), len(self.t1)), [0,len(self.t1)-1]))
                         un1, ct1 = np.unique(id1, return_counts = True)
-                        id2 = np.random.randint(0, len(self.t2), len(self.t2))
+                        id2 = np.hstack((np.random.randint(0, len(self.t2), len(self.t2)), [0,len(self.t2)-1]))
                         un2, ct2 = np.unique(id2, return_counts = True)
                         # FR
                         y1 = np.random.normal(self.y1[un1], self.e1[un1]/np.sqrt(ct1))
@@ -486,9 +520,9 @@ class CCF():
 
                     if self.FR_RSS == 2:
                         # only RSS
-                        id1 = np.random.randint(0, len(self.t1), len(self.t1))
+                        id1 = np.hstack((np.random.randint(0, len(self.t1), len(self.t1)), [0,len(self.t1)-1]))
                         un1, ct1 = np.unique(id1, return_counts = True)
-                        id2 = np.random.randint(0, len(self.t2), len(self.t2))
+                        id2 = np.hstack((np.random.randint(0, len(self.t2), len(self.t2)), [0,len(self.t2)-1]))
                         un2, ct2 = np.unique(id2, return_counts = True)
                         t1, y1, e1 = self.t1[un1], self.y1[un1], self.e1[un1]/np.sqrt(ct1)
                         t2, y2, e2 = self.t2[un2], self.y2[un2], self.e2[un2]/np.sqrt(ct2)
@@ -656,6 +690,8 @@ class CCF():
             return self._job2(n)
         if loop == 3:
             return self._job3(n)
+        if loop == 4:
+            return self._job4(n)
             
     def _job1(self, n):
         # multiprocess job function for MC
@@ -664,9 +700,9 @@ class CCF():
             if self.FR_RSS == 0:
                 # both FR and RSS
                 # RSS
-                id1 = np.random.randint(0, len(self.t1), len(self.t1))
+                id1 = np.hstack(( np.random.randint(0, len(self.t1), len(self.t1)),[0,len(self.t1)-1]))
                 un1, ct1 = np.unique(id1, return_counts = True)
-                id2 = np.random.randint(0, len(self.t2), len(self.t2))
+                id2 = np.hstack(( np.random.randint(0, len(self.t2), len(self.t2)),[0,len(self.t2)-1]))
                 un2, ct2 = np.unique(id2, return_counts = True)
                 #FR
                 y1 = np.random.normal(self.y1[un1], self.e1[un1]/np.sqrt(ct1))
@@ -682,9 +718,9 @@ class CCF():
 
             if self.FR_RSS == 2:
                 #only RSS
-                id1 = np.random.randint(0, len(self.t1), len(self.t1))
+                id1 = np.hstack(( np.random.randint(0, len(self.t1), len(self.t1)),[0,len(self.t1-1)]))
                 un1, ct1 = np.unique(id1, return_counts = True)
-                id2 = np.random.randint(0, len(self.t2), len(self.t2))
+                id2 = np.hstack(( np.random.randint(0, len(self.t2), len(self.t2)),[0,len(self.t2-1)]))
                 un2, ct2 = np.unique(id2, return_counts = True)
                 t1, y1, e1 = self.t1[un1], self.y1[un1], self.e1[un1]/np.sqrt(ct1)
                 t2, y2, e2 = self.t2[un2], self.y2[un2], self.e2[un2]/np.sqrt(ct2)
@@ -735,6 +771,24 @@ class CCF():
         lag_sim1_a.append(lagsim)
         r_sim1_a.append(rsim)
         lock.release()
+    
+    def _job4(self, nn0_ysim_t12_cadence):
+        np.random.seed()
+       
+        n, ysim_t1_cadence, ysim_t2_cadence = nn0_ysim_t12_cadence
+        # multiprocess job function for CalSig, simulated y1 and y2
+        lagsim, rsim, nptsim = self.ICCF_CARMA(self.t1, ysim_t1_cadence, self.e1, self.t2, ysim_t2_cadence, self.e2, tau_min = self.tau_min, 
+                                               tau_max = self.tau_max, step = self.step, 
+                                               interp = self.interp, mcmc_nsamples = self.mcmc_nsamples, p1 = self.p1, 
+                                               q1 = self.q1, p2 = self.p2, q2 = self.q2, carma_model = self.carma_model, imode = self.imode)
+        
+        lock.acquire()
+        nn0.append(n)
+        lag_sim0_a.append(lagsim)
+        r_sim0_a.append(rsim)
+        lock.release()
+
+        
         
 
     def CalSig(self, sim_ntrials):
@@ -751,36 +805,65 @@ class CCF():
                     model = cm.CarmaModel(self.t2, self.y2, self.e2, p = self.p2, q = self.q2)
                     self.sample2 = model.run_mcmc(self.mcmc_nsamples)
                     
+        if self.sim_mode == 1:
+            # produce sim_ntrials simulated LC for both continuum and emission lines
+            sim_ntrials = sim_ntrials * 2 
+        
         # produce 100x long LC and randomly select a segment from 10 to 100 and impose the same cadence and errors
         n1 = 0
+        acceptance_limit = 0.001
+        acceptance_rate_y2 = []
         for i in range(sim_ntrials/2):
+            #print i
             nn = np.random.randint(10, 100)
             tsim = np.arange(nn*self.t2.max(), nn*self.t2.max()+self.t2.max()-self.t2.min(), 
                                 (self.t2.max()-self.t2.min())/self.t2.shape[0])
             if self.Nmodel>2:
-                if i%(sim_ntrials/self.Nmodel) == 0 and n1<self.Nmodel/2:
+                if (i%(sim_ntrials/self.Nmodel) == 0) and (n1<self.Nmodel/2):
                     n1 = n1+1
                     with quiet():
                         model = cm.CarmaModel(self.t2, self.y2, self.e2, p = self.p2, q = self.q2)
                         sample = model.run_mcmc(self.mcmc_nsamples)  
                 ysim = sample.simulate(tsim, bestfit = 'map')
+                Tsim = tsim-tsim.min()+self.t2.min()
+                ysim_t2 = np.interp(self.t2, Tsim, ysim)
+                # let variability amp is between + - 20%  of orignial LC
+                nt = 0
+                good = 0. 
+                bad = 0.
+                while nt <1:
+                    if  (good/(good+bad) < acceptance_limit) and (good + bad > 1./acceptance_limit):
+                        raise Exception("Your acceptance rate is < 1% for producing mock light curve, you can set a higher MCMC_nsamples or loose the variability range (sim_var_range).")
+                    if (np.random.normal(ysim_t2, self.e2).std() < self.y2.std()*(1.+self.sim_var_range)) and (np.random.normal(ysim_t2,self.e2).std() > self.y2.std()*(1.-self.sim_var_range)):
+                        nt = 1
+                        good = good + 1
+                    else:
+                        ysim = sample.simulate(tsim, bestfit = 'map')
+                        ysim_t2 = np.interp(self.t2, Tsim, ysim)
+                        bad = bad +1
             else:
                 ysim = self.sample2.simulate(tsim, bestfit = 'map')
-            tsim = tsim-tsim.min()+self.t2.min()
-            ysim_t2 = np.interp(self.t2, tsim, ysim)
-            
-            if self.scale_simLC == True:
-                # scale the smilated LC to have the same mean and variance as the orignial one.
-                fc =  np.sqrt(self.y2.var()/ysim_t2.var())
-                shift = (ysim_t2*fc).mean()-self.y2.mean()
-                y2_sim = ysim_t2*fc-shift
-            else:
-                y2_sim = ysim_t2
-                
+                Tsim = tsim-tsim.min()+self.t2.min()
+                ysim_t2 = np.interp(self.t2, Tsim, ysim)
+                nt=0
+                good = 0.
+                bad = 0.
+                while nt <1:
+                    if  (good/(good + bad + 1.) < acceptance_limit) and (good + bad > 1./acceptance_limit):
+                        raise Exception("Your acceptance rate is < 0.1% for producing mock light curve, you can set a higher MCMC_nsamples or loose the variability range (sim_var_range).")
+                    if (np.random.normal(ysim_t2, self.e2).std() < self.y2.std()*(1.+self.sim_var_range)) and (np.random.normal(ysim_t2,self.e2).std() > self.y2.std()*(1.-self.sim_var_range)):
+                        nt = 1
+                        good = good + 1
+                    else:
+                        ysim = self.sample2.simulate(tsim, bestfit = 'map')
+                        ysim_t2 = np.interp(self.t2, Tsim, ysim)
+                        bad = bad + 1
+            acceptance_rate_y2.append(good/(good+bad+1.))
+            y2_sim = ysim_t2   
             ysim_t2_cadence.append(y2_sim)
+        self.acceptance_rate_y2 = np.array(acceptance_rate_y2).mean()
         ysim_t2_cadence = np.array(ysim_t2_cadence).reshape(-1, len(self.t2))
         self.ysim_t2_cadence = np.array(ysim_t2_cadence)
-        
         
         # prepare for simulated y1
         ysim_t1_cadence = []
@@ -790,74 +873,115 @@ class CCF():
                     model = cm.CarmaModel(self.t1, self.y1, self.e1, p = self.p1, q = self.q1)
                     self.sample1 = model.run_mcmc(self.mcmc_nsamples)
                     
-        n2 = 0       
+        n2 = 0 
+        acceptance_rate_y1 = []
         for j in range(sim_ntrials/2):
             #print j
             nn = np.random.randint(10, 100)
             tsim = np.arange(nn*self.t1.max(), nn*self.t1.max()+self.t1.max()-self.t1.min(), 
                                 (self.t1.max()-self.t1.min())/self.t1.shape[0])
             if self.Nmodel>2:
-                if i%(sim_ntrials/self.Nmodel) == 0 and n2<self.Nmodel/2:
+                if (j%(sim_ntrials/self.Nmodel) == 0) and (n2<self.Nmodel/2):
                     n2 = n2+1
                     with quiet():
                         model = cm.CarmaModel(self.t1, self.y1, self.e1, p = self.p1, q = self.q1)
                         sample = model.run_mcmc(self.mcmc_nsamples)
                 ysim = sample.simulate(tsim, bestfit = 'map')
+                Tsim = tsim-tsim.min()+self.t1.min()
+                ysim_t1 = np.interp(self.t1, Tsim, ysim)
+                # let variability amp is between + - 20%  of orignial LC
+                nt = 0
+                good = 0.
+                bad = 0.
+                while nt <1:
+                    if  (good/(good + bad +1.) < acceptance_limit) and (good + bad > 1./acceptance_limit):
+                        raise Exception("Your acceptance rate is < 1% for producing mock light curve, you can set a higher MCMC_nsamples or loose the variability range (sim_var_range).")
+                    if (np.random.normal(ysim_t1, self.e1).std() < self.y1.std()*(1.+self.sim_var_range)) and (np.random.normal(ysim_t1,self.e1).std() > self.y1.std()*(1.-self.sim_var_range)):
+                        nt=1
+                        good = good +1
+                    else:
+                        ysim = sample.simulate(tsim, bestfit = 'map')
+                        ysim_t1 = np.interp(self.t1, Tsim, ysim)
+                        bad = bad +1
             else:
                 ysim = self.sample1.simulate(tsim, bestfit = 'map')
-            tsim = tsim-tsim.min()+self.t1.min()
-            
-            ysim_t1 = np.interp(self.t1, tsim, ysim)
-        
-            if self.scale_simLC == True:
-                fc =  np.sqrt(self.y1.var()/ysim_t1.var())
-                shift = (ysim_t1*fc).mean()-self.y1.mean()
-                y1_sim = ysim_t1*fc-shift
-            else:
-                y1_sim = ysim_t1
-
+                Tsim = tsim-tsim.min()+self.t1.min()
+                ysim_t1 = np.interp(self.t1, Tsim, ysim)
+                nt=0
+                good = 0
+                bad = 0
+                while nt <1:
+                    if  (good/(good + bad + 1.) < acceptance_limit) and (good + bad > 1./acceptance_limit):
+                        raise Exception("Your acceptance rate is < 1% for producing mock light curve, you can set a higher MCMC_nsamples or loose the variability range (sim_var_range).")
+                    if (np.random.normal(ysim_t1, self.e1).std() < self.y1.std()*(1.+self.sim_var_range)) and (np.random.normal(ysim_t1,self.e1).std() > self.y1.std()*(1.-self.sim_var_range)):
+                        nt=1
+                        good = good +1
+                    else:
+                        ysim = self.sample1.simulate(tsim, bestfit = 'map')
+                        ysim_t1 = np.interp(self.t1, Tsim, ysim)
+                        bad = bad +1
+            acceptance_rate_y1.append(good/(good+bad+1.))
+            y1_sim = ysim_t1
             ysim_t1_cadence.append(y1_sim)
-            
-           
+   
+        self.acceptance_rate_y1 = np.array(acceptance_rate_y1).mean()  
         ysim_t1_cadence = np.array(ysim_t1_cadence).reshape(-1, len(self.t1))
         self.ysim_t1_cadence = np.array(ysim_t1_cadence)
         
         #-------multiprocessing or not-----------------                        
         if self.MP == False: 
-            #for simulated y2
-            lag_sim2_all = []
-            r_sim2_all = []
-            
-            # measure the CCF for the simulated and real LCs
-            for i in range(len(ysim_t2_cadence)):
-                lagsim, rsim, nptsim = self.ICCF_CARMA(self.t1, self.y1, self.e1, self.t2, ysim_t2_cadence[i], self.e2, tau_min = self.tau_min, 
-                                                       tau_max = self.tau_max, step = self.step, 
-                                                       interp = self.interp, mcmc_nsamples = self.mcmc_nsamples, p1 = self.p1, 
-                                                       q1 = self.q1, p2 = self.p2, q2 = self.q2, carma_model = self.carma_model, imode = self.imode)
-                lag_sim2_all.append(lagsim)
-                r_sim2_all.append(rsim)
-                
-            lag_sim2_all = np.array(lag_sim2_all)
-            r_sim2_all = np.array(r_sim2_all)
+            #-----single simulated LC or both-----
+            if self.sim_mode == 0:
+                #for simulated y2
+                lag_sim2_all = []
+                r_sim2_all = []
 
-            #for simulated y1
-            lag_sim1_all = []
-            r_sim1_all = []
-            plt.figure(figsize = (8, 6))
-            for j in range(len(ysim_t1_cadence)):
+                # measure the CCF for the simulated and real LCs
+                for i in range(len(ysim_t2_cadence)):
+                    lagsim, rsim, nptsim = self.ICCF_CARMA(self.t1, self.y1, self.e1, self.t2, ysim_t2_cadence[i], self.e2, tau_min = self.tau_min, 
+                                                           tau_max = self.tau_max, step = self.step, 
+                                                           interp = self.interp, mcmc_nsamples = self.mcmc_nsamples, p1 = self.p1, 
+                                                           q1 = self.q1, p2 = self.p2, q2 = self.q2, carma_model = self.carma_model, imode = self.imode)
+                    lag_sim2_all.append(lagsim)
+                    r_sim2_all.append(rsim)
+
+                lag_sim2_all = np.array(lag_sim2_all)
+                r_sim2_all = np.array(r_sim2_all)
+
+                #for simulated y1
+                lag_sim1_all = []
+                r_sim1_all = []
+                plt.figure(figsize = (8, 6))
+                for j in range(len(ysim_t1_cadence)):
+
+                    lagsim, rsim, nptsim = self.ICCF_CARMA(self.t1, ysim_t1_cadence[j], self.e1, self.t2, self.y2, self.e2, tau_min = self.tau_min, 
+                                                           tau_max = self.tau_max, step = self.step, 
+                                                           interp = self.interp, mcmc_nsamples = self.mcmc_nsamples, p1 = self.p1, 
+                                                           q1 = self.q1, p2 = self.p2, q2 = self.q2, carma_model = self.carma_model, imode = self.imode)
+                    lag_sim1_all.append(lagsim)
+                    r_sim1_all.append(rsim)
+
+                lag_sim1_all = np.array(lag_sim1_all)
+                r_sim1_all = np.array(r_sim1_all)
+            else:
+                lag_sim0_all = []
+                r_sim0_all = []
+
+                # measure the CCF for the simulated and real LCs
+                for i in range(len(ysim_t1_cadence)):
+                    lagsim, rsim, nptsim = self.ICCF_CARMA(self.t1, self.y1, ysim_t1_cadence[i], self.t2, ysim_t2_cadence[i], self.e2, tau_min = self.tau_min, 
+                                                           tau_max = self.tau_max, step = self.step, 
+                                                           interp = self.interp, mcmc_nsamples = self.mcmc_nsamples, p1 = self.p1, 
+                                                           q1 = self.q1, p2 = self.p2, q2 = self.q2, carma_model = self.carma_model, imode = self.imode)
+                    lag_sim0_all.append(lagsim)
+                    r_sim0_all.append(rsim)
+
+                lag_sim0_all = np.array(lag_sim0_all)
+                r_sim0_all = np.array(r_sim0_all)
                 
-                lagsim, rsim, nptsim = self.ICCF_CARMA(self.t1, ysim_t1_cadence[j], self.e1, self.t2, self.y2, self.e2, tau_min = self.tau_min, 
-                                                       tau_max = self.tau_max, step = self.step, 
-                                                       interp = self.interp, mcmc_nsamples = self.mcmc_nsamples, p1 = self.p1, 
-                                                       q1 = self.q1, p2 = self.p2, q2 = self.q2, carma_model = self.carma_model, imode = self.imode)
-                lag_sim1_all.append(lagsim)
-                r_sim1_all.append(rsim)
-            
-            lag_sim1_all = np.array(lag_sim1_all)
-            r_sim1_all = np.array(r_sim1_all)
         else:
             #multiprocessing
-            global loop, lag_sim1_a, lag_sim2_a, r_sim1_a, r_sim2_a, nn1, nn2
+            global loop, lag_sim1_a, lag_sim2_a, r_sim1_a, r_sim2_a, nn1, nn2, nn0, lag_sim0_a, r_sim0_a
             loop = 2 # go job2
             lag_sim1_a = manager.list([])
             lag_sim2_a = manager.list([])
@@ -865,6 +989,9 @@ class CCF():
             r_sim2_a = manager.list([])
             nn1 = manager.list([])
             nn2 = manager.list([])
+            nn0 = manager.list([])
+            lag_sim0_a = manager.list([])
+            r_sim0_a = manager.list([])
             p2 = Pool()
             
             p2.map(self, zip(range(len(ysim_t2_cadence)), ysim_t2_cadence))
@@ -878,15 +1005,25 @@ class CCF():
             p3.map(self, zip(range(len(ysim_t2_cadence)), ysim_t1_cadence))
             p3.close()
             p3.join()
-            
-            
             lag_sim1_all = np.array(list(lag_sim1_a))[np.argsort(nn1)]
             r_sim1_all = np.array(list(r_sim1_a))[np.argsort(nn1)]
             
+            loop =4 # go job4
+            p4 = Pool()
+            p4.map(self, zip(range(len(ysim_t1_cadence)), ysim_t1_cadence, ysim_t2_cadence))
+            p4.close()
+            p4.join()
+            lag_sim0_all = np.array(list(lag_sim0_a))[np.argsort(nn0)]
+            r_sim0_all = np.array(list(r_sim0_a))[np.argsort(nn0)]
+           
         
         # save all the simulated CCF, 1 means simulated y1, 2 means simulated y2
-        lag_sim = np.array(np.vstack((lag_sim1_all, lag_sim2_all)))
-        r_sim = np.array(np.vstack((r_sim1_all, r_sim2_all)))
+        if self.sim_mode ==0:
+            lag_sim = np.array(np.vstack((lag_sim1_all, lag_sim2_all)))
+            r_sim = np.array(np.vstack((r_sim1_all, r_sim2_all)))
+        else:
+            lag_sim = lag_sim0_all
+            r_sim = r_sim0_all
         
         #--------------------------------------------------------------------------
         #calculate significance p_all, p_positive, p_peak
@@ -960,10 +1097,19 @@ class CCF():
         plt.figure(figsize = (15, 10))
         plt.subplots_adjust(hspace=0)
         # plot contimuum ------------------------------
-        if self.shift == 'peak':
-            offset = self.peak_pack_MC[1]
-        else:
-            offset = self.cen_pack_MC[1]
+        try:
+            if self.shift == 'peak':
+                offset = self.peak_pack_MC[1]
+            else:
+                offset = self.cen_pack_MC[1]
+        except:
+            if self.shift == 'peak':
+                offset = self.lag_peak
+            else:
+                if self.lag_cen != -9999.:
+                    offset = self.lag_cen
+                else:
+                    offset = self.lag_peak
         xmin,xmax = min(self.t1.min(),self.t2.min()-offset), max(self.t1.max(),self.t2.max()-offset)
         ax = plt.subplot(311)
         if self.interp == 'carma':
@@ -986,6 +1132,10 @@ class CCF():
             plt.errorbar(self.t1, self.y1, yerr = self.e1, fmt = '.', color = 'k', lw = 1)
             plt.errorbar(self.t1, self.y1, yerr = self.e1, fmt = '-', color = 'k', lw=1, alpha=0.2)
             plt.title(self.name+':  interp = '+self.interp+', detrend = '+ str(self.detrend))
+        if self.detrend > 0:
+            time = np.linspace(self.t1.min(),self.t1.max(),1000)
+            cont = np.poly1d(np.polyfit(self.t1, self.y1, self.detrend))
+            plt.plot(time,cont(time),'grey')
         plt.text(0.8, 0.9, r'$\rm VAR_{SNR}$ = '+str(np.round(self.var_sn1, 1)), fontsize=16, transform = ax.transAxes)
         plt.ylabel('Flux')
         plt.xticks([])
@@ -1010,6 +1160,10 @@ class CCF():
         else:
             plt.errorbar(self.t2, self.y2, yerr = self.e2, fmt = '.', color = 'k', lw = 1)
             plt.errorbar(self.t2, self.y2, yerr = self.e2, fmt = '-', color = 'k', lw = 1, alpha = 0.1)
+        if self.detrend > 0:
+            time = np.linspace(self.t2.min(),self.t2.max(),1000)
+            line = np.poly1d(np.polyfit(self.t2, self.y2, self.detrend))
+            plt.plot(time,line(time),'grey')
         plt.text(0.8, 0.9, r'$\rm VAR_{SNR}$ = '+str(np.round(self.var_sn2, 1)), fontsize=16, transform = ax.transAxes)
         plt.ylabel('Flux')
         plt.xticks([])
@@ -1017,8 +1171,14 @@ class CCF():
         
         # plot normalized LCs--------------------------
         ax = plt.subplot(313)
-        plt.errorbar(self.t1, (self.y1-self.y1.mean())*self.y2.std()/self.y1.std(), yerr = self.e1, fmt = '.', color = 'b', label = 'cont' )
-        plt.errorbar(self.t2-offset, self.y2-self.y2.mean() , yerr = self.e2, fmt = '.', color = 'r', label = 'line')
+        if self.detrend > 0:
+            # use new t1,t2,y1,y2 but orignial e1 e2
+            t1, y1, t2, y2 = self.Detrend(self.t1, self.y1, self.t2, self.y2)
+            plt.errorbar(t1, (y1-y1.mean())*y2.std()/y1.std(), yerr = self.e1, fmt = '.', color = 'b', label = 'cont' )
+            plt.errorbar(t2-offset, y2-y2.mean() , yerr = self.e2, fmt = '.', color = 'r', label = 'line')
+        else:
+            plt.errorbar(self.t1, (self.y1-self.y1.mean())*self.y2.std()/self.y1.std(), yerr = self.e1, fmt = '.', color = 'b', label = 'cont' )
+            plt.errorbar(self.t2-offset, self.y2-self.y2.mean() , yerr = self.e2, fmt = '.', color = 'r', label = 'line')
         plt.text(0.8, 0.1, 'offset = '+ str(offset), transform = ax.transAxes, fontsize = 16)
         plt.ylabel('Flux')
         plt.xlabel('Time')
@@ -1128,13 +1288,17 @@ class CCF():
             # plot simulated CCF panels
             if self.sim_ntrials >1:
                 ax = plt.subplot(2, 6, (7, 11))
-                for i in range(self.r_sim.shape[0]):
-                    if i <self.r_sim.shape[0]/2.:
-                        # simulated y1
+                if self.sim_mode == 0:
+                    for i in range(self.r_sim.shape[0]):
+                        if i <self.r_sim.shape[0]/2.:
+                            # simulated y1
+                            plt.plot(self.lag_sim[i, :], self.r_sim[i, :], 'gray', lw = 1, alpha = 0.1)
+                        else:
+                            # simualted y2
+                            plt.plot(self.lag_sim[i, :], self.r_sim[i, :], 'c', lw = 1, alpha = 0.1)
+                else:
+                    for i in range(self.r_sim.shape[0]):
                         plt.plot(self.lag_sim[i, :], self.r_sim[i, :], 'gray', lw = 1, alpha = 0.1)
-                    else:
-                        # simualted y2
-                        plt.plot(self.lag_sim[i, :], self.r_sim[i, :], 'c', lw = 1, alpha = 0.1)
                 sig1, sig2, sig3 = [], [], []
                 
                 for i in range(self.r_sim.shape[1]):
@@ -1152,6 +1316,11 @@ class CCF():
                 plt.plot([], [], 'g', label = r'$\rm 1\sigma$')
                 plt.plot([], [], 'm', label = r'$\rm 2\sigma$')
                 plt.plot([], [], 'b', label = r'$\rm 3\sigma$')
+                if self.sim_mode == 0:
+                    plt.plot([], [], 'grey', label = r'$\rm interp\ y1$')
+                    plt.plot([], [], 'c', label = r'$\rm interp\ y2$')
+                else:
+                    plt.plot([], [], 'grey', label = r'$\rm interp\ y1&y2$')
         
                 plt.xlim(self.tau_min, self.tau_max)
                 plt.ylim(-1, 1)
@@ -1173,6 +1342,93 @@ class CCF():
         
         if self.save == True:
             plt.savefig(self.path+self.name+'_CCF.pdf')
+            
+    def CheckMockLC(self, nth_highest):
+        "Check the mock light cruve with higher CCF peak."
+        
+        ind=np.where( (self.lag_sim_peak>0) & (self.r_sim_peak>self.r.max()))
+        idx=np.argsort(self.r_sim_peak[ind])
+        print("Totally, " + str(len(idx))+" simulations have higher CCF peaks.")
+        if nth_highest > len(idx):
+            raise Exception("There are only "+str(len(idx))+" CCFs hgiher than observed one!" )
+        else:
+            num = nth_highest
+        ind= np.array(ind).flatten()[idx[-1*num]]
+        
+        if self.sim_mode ==0:
+            if ind<self.sim_ntrials/2:
+                #sim cont
+                y1,y2 = self.ysim_t1_cadence[ind,:],self.y2 
+                label1 = 'sim cont'
+            else:
+                y1,y2 = self.y1,self.ysim_t2_cadence[ind-self.sim_ntrials/2,:]
+                label2 = 'sim line'
+        else:
+            y1,y2 = self.ysim_t1_cadence[ind,:],self.ysim_t2_cadence[ind,:]
+            label1,label2 = 'sim cont', 'sim line'
+            
+        lag, r, _ = self.ICCF_CARMA(self.t1, y1, self.e1, self.t2, y2, self.e2, tau_min = self.tau_min, tau_max = self.tau_max, 
+                    step = self.step, interp = self.interp, mcmc_nsamples = self.mcmc_nsamples, p1 = self.p1, q1 = self.q1, 
+                    p2 = self.p2, q2 = self.q2, carma_model = self.carma_model, imode = self.imode)
+        lag_peak, lag_cen, _, _ = self.Lag_center(lag, r)
+        if lag_cen != -9999.0:
+            offset = np.round(lag_cen,2)
+        else:
+            offset = np.round(lag_peak,2)
+        plt.figure(figsize=(15,12))
+        ax=plt.subplot(411)
+        plt.plot(lag,r,'k')
+        plt.text(0.05, 0.1, r'$r_{\rm max}$ = '+ str(np.round(r.max(),4)), transform = ax.transAxes, fontsize = 16, color = 'r')
+        plt.xlabel('Lag (days)')
+        plt.ylabel('r')
+        
+        
+        plt.subplot(412)
+        if label1 == 'sim cont':
+            lab = label1
+        else:
+            lab = 'cont'
+        xmin,xmax = min(self.t1.min(),self.t2.min()-offset), max(self.t1.max(),self.t2.max()-offset)
+        plt.errorbar(self.t1, y1, yerr = self.e1, fmt = '.', color = 'b', lw = 1, label = lab) 
+        plt.xlim(xmin,xmax)
+        plt.legend(fontsize=16)
+        plt.ylabel('Flux')
+        if self.detrend > 0:
+            time = np.linspace(self.t1.min(),self.t1.max(),1000)
+            cont = np.poly1d(np.polyfit(self.t1, y1, self.detrend))
+            plt.plot(time,cont(time),'grey')
+        
+        plt.subplot(413)
+        if label2 == 'sim line':
+            lab = label2
+        else:
+            lab = 'line'
+        plt.errorbar(self.t2, y2, yerr = self.e2, fmt = '.', color = 'r', lw = 1, label = lab) 
+        plt.xlim(xmin,xmax)
+        plt.ylabel('Flux')
+        plt.legend(fontsize=16)
+        if self.detrend > 0:
+            time = np.linspace(self.t2.min(),self.t2.max(),1000)
+            cont = np.poly1d(np.polyfit(self.t2, y2, self.detrend))
+            plt.plot(time,cont(time),'grey')
+        
+        ax = plt.subplot(414)
+        if self.detrend > 0:
+            # use new t1,t2,y1,y2 but orignial e1 e2
+            t1, y1, t2, y2 = self.Detrend(self.t1, y1, self.t2, y2)
+            plt.errorbar(t1, (y1-y1.mean())*y2.std()/y1.std(), yerr = self.e1, fmt = '.', color = 'b', label = 'cont' )
+            plt.errorbar(t2-offset, y2-y2.mean() , yerr = self.e2, fmt = '.', color = 'r', label = 'line')
+        else:
+            plt.errorbar(self.t1, (y1-y1.mean())*y2.std()/y1.std(), yerr = self.e1, fmt = '.', color = 'b', label = 'cont' )
+            plt.errorbar(self.t2-offset, y2-y2.mean() , yerr = self.e2, fmt = '.', color = 'r', label = 'line')
+        plt.text(0.8, 0.1, 'offset = '+ str(offset), transform = ax.transAxes, fontsize = 16)
+        plt.ylabel('Flux')
+        plt.xlabel('Time')
+        plt.xlim(xmin,xmax)
+        plt.legend(fontsize=16)
+        plt.tight_layout()
+        
+        
         
     def SaveResults(self):
         if self.sim_ntrials <2:
@@ -1220,57 +1476,59 @@ class CCF():
             c28 = fits.Column(name = 'failed_CCF_MC', array = np.array([self.failed_CCF_MC]), format = 'F')
             c29 = fits.Column(name = 'VAR_SN1', array = np.array([self.var_sn1]), format = 'F')
             c30 = fits.Column(name = 'VAR_SN2', array = np.array([self.var_sn2]), format = 'F')
+            c31 = fits.Column(name = 'rmax', array = np.array([self.rmax]), format = 'F')
             
             #---2rd extension--------------------
-            c31 = fits.Column(name = 't1', array = self.t1, format = 'F')
-            c32 = fits.Column(name = 'y1', array = self.y1, format = 'F')
-            c33 = fits.Column(name = 'e1', array = self.e1, format = 'F')
-            c34 = fits.Column(name = 't2', array = self.t2, format = 'F')
-            c35 = fits.Column(name = 'y2', array = self.y2, format = 'F')
-            c36 = fits.Column(name = 'e2', array = self.e2, format = 'F')
+            c32 = fits.Column(name = 't1', array = self.t1, format = 'F')
+            c33 = fits.Column(name = 'y1', array = self.y1, format = 'F')
+            c34 = fits.Column(name = 'e1', array = self.e1, format = 'F')
+            c35 = fits.Column(name = 't2', array = self.t2, format = 'F')
+            c36 = fits.Column(name = 'y2', array = self.y2, format = 'F')
+            c37 = fits.Column(name = 'e2', array = self.e2, format = 'F')
 
-            c37 = fits.Column(name = 'lag', array = self.lag, format = 'F')
-            c38 = fits.Column(name = 'r', array = self.r, format = 'F')
-            c39 = fits.Column(name = 'npt', array = self.npt, format = 'F')
+            c38 = fits.Column(name = 'lag', array = self.lag, format = 'F')
+            c39 = fits.Column(name = 'r', array = self.r, format = 'F')
+            c40 = fits.Column(name = 'npt', array = self.npt, format = 'F')
             
             if self.imode !=2:
-                c40 = fits.Column(name = 'r_1', array = self.r_1, format = 'F')
-                c41 = fits.Column(name = 'npt_1', array = self.npt_1, format = 'F')
+                c41 = fits.Column(name = 'r_1', array = self.r_1, format = 'F')
+                c42 = fits.Column(name = 'npt_1', array = self.npt_1, format = 'F')
             else:
-                c40 = fits.Column(name = 'r_1', array = np.array([]), format = 'F')
-                c41 = fits.Column(name = 'npt_1', array = np.array([]), format = 'F')
+                c41 = fits.Column(name = 'r_1', array = np.array([]), format = 'F')
+                c42 = fits.Column(name = 'npt_1', array = np.array([]), format = 'F')
             if self.imode !=1:
-                c42 = fits.Column(name = 'r_2', array = self.r_2, format = 'F')
-                c43 = fits.Column(name = 'npt_2', array = self.npt_2, format = 'F')
+                c43 = fits.Column(name = 'r_2', array = self.r_2, format = 'F')
+                c44 = fits.Column(name = 'npt_2', array = self.npt_2, format = 'F')
             else:
-                c42 = fits.Column(name = 'r_2', array = np.array([]), format = 'F')
-                c43 = fits.Column(name = 'npt_2', array = np.array([]), format = 'F')
+                c43 = fits.Column(name = 'r_2', array = np.array([]), format = 'F')
+                c44 = fits.Column(name = 'npt_2', array = np.array([]), format = 'F')
                 
-            c44 = fits.Column(name = 'lag_peak_MC', array = self.lag_peak_MC, format = 'F')
-            c45 = fits.Column(name = 'lag_cen_MC', array = self.lag_cen_MC, format = 'F')
-            c46 = fits.Column(name = 'r_sim_peak', array = self.r_sim_peak, format = 'F')
-            c47 = fits.Column(name = 'r_sim_cen', array = self.r_sim_cen, format = 'F')
+            c45 = fits.Column(name = 'lag_peak_MC', array = self.lag_peak_MC, format = 'F')
+            c46 = fits.Column(name = 'lag_cen_MC', array = self.lag_cen_MC, format = 'F')
+            c47 = fits.Column(name = 'r_sim_peak', array = self.r_sim_peak, format = 'F')
+            c48 = fits.Column(name = 'r_sim_cen', array = self.r_sim_cen, format = 'F')
             
-            c48 = fits.Column(name = 'lag_sim', array = self.lag_sim, dim = '('+str(self.lag_sim.shape[1])+')', format = str(self.lag_sim.shape[1])+'E')
-            c49 = fits.Column(name = 'r_sim', array = self.r_sim, dim = '('+str(self.r_sim.shape[1])+')', format = str(self.r_sim.shape[1])+'E')
-            c50 = fits.Column(name = 'ysim_t1_cadence', array = self.ysim_t1_cadence, dim = '('+str(self.ysim_t1_cadence.shape[1])+')', format = str(self.ysim_t1_cadence.shape[1])+'E')
-            c51 = fits.Column(name = 'ysim_t2_cadence', array = self.ysim_t2_cadence, dim = '('+str(self.ysim_t2_cadence.shape[1])+')', format = str(self.ysim_t2_cadence.shape[1])+'E')
+            c49 = fits.Column(name = 'lag_sim', array = self.lag_sim, dim = '('+str(self.lag_sim.shape[1])+')', format = str(self.lag_sim.shape[1])+'E')
+            c50 = fits.Column(name = 'r_sim', array = self.r_sim, dim = '('+str(self.r_sim.shape[1])+')', format = str(self.r_sim.shape[1])+'E')
+            c51 = fits.Column(name = 'ysim_t1_cadence', array = self.ysim_t1_cadence, dim = '('+str(self.ysim_t1_cadence.shape[1])+')', format = str(self.ysim_t1_cadence.shape[1])+'E')
+            c52 = fits.Column(name = 'ysim_t2_cadence', array = self.ysim_t2_cadence, dim = '('+str(self.ysim_t2_cadence.shape[1])+')', format = str(self.ysim_t2_cadence.shape[1])+'E')
             
             # produce fits
             ex0 = fits.PrimaryHDU()
-            ex1 = fits.BinTableHDU.from_columns([c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, c18, c19, c20, c21, c22, c23, c24, c25, c26, c27, c28, c29, c30])
+            ex1 = fits.BinTableHDU.from_columns([c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16, c17, c18, c19, c20, c21, c22, c23, c24, c25, c26, c27, c28, c29, c30, c31])
             
             if self.weight == True:
-                c52 = fits.Column(name = 'weighting', array = self.weighting, format = 'F')
-                c53 = fits.Column(name = 'lag_ACF', array = self.lag_ACF, format = 'F')
-                c54 = fits.Column(name = 'r_ACF', array = self.r_ACF, format = 'F')
-                ex2 = fits.BinTableHDU.from_columns([c31, c32, c33, c34, c35, c36, c37, c38, c39, c40, c41, c42, c43, c44, c45, c46, c47, c48, c49, c50, c51, c52, c53, c54])
+                c53 = fits.Column(name = 'weighting', array = self.weighting, format = 'F')
+                c54 = fits.Column(name = 'lag_ACF', array = self.lag_ACF, format = 'F')
+                c55 = fits.Column(name = 'r_ACF', array = self.r_ACF, format = 'F')
+                ex2 = fits.BinTableHDU.from_columns([c32, c33, c34, c35, c36, c37, c38, c39, c40, c41, c42, c43, c44, c45, c46, c47, c48, c49, c50, c51, c52, c53, c54, c55])
             else:
-                ex2 = fits.BinTableHDU.from_columns([c31, c32, c33, c34, c35, c36, c37, c38, c39, c40, c41, c42, c43, c44, c45])
+                ex2 = fits.BinTableHDU.from_columns([c32, c33, c34, c35, c36, c37, c38, c39, c40, c41, c42, c43, c44, c45, c46])
             
             if self.lite == False:
                 hdul = fits.HDUList([ex0, ex1, ex2])
             else:
                 hdul = fits.HDUList([ex0, ex1])
             hdul.writeto(self.path+self.name+'.fits', overwrite = True)
+
 
